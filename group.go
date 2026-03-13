@@ -2,6 +2,7 @@ package goroutine
 
 import (
 	"context"
+	"fmt"
 	"sync"
 )
 
@@ -29,14 +30,28 @@ func (g *Group) Go(fn Task) {
 		return
 	}
 	g.wg.Add(1)
-	err := g.pool.Submit(func(ctx context.Context) error {
+
+	task := func(ctx context.Context) error {
 		defer g.wg.Done()
+		defer func() {
+			if r := recover(); r != nil {
+				var err error
+				if e, ok := r.(error); ok {
+					err = e
+				} else {
+					err = fmt.Errorf("%v", r)
+				}
+				g.cancel(err)
+			}
+		}()
 		if err := fn(g.ctx); err != nil {
 			g.cancel(err)
 			return err
 		}
 		return nil
-	})
+	}
+
+	err := g.pool.SubmitCtx(g.ctx, task)
 	if err != nil {
 		g.wg.Done()
 	}

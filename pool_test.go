@@ -136,3 +136,33 @@ func TestPoolTaskContext(t *testing.T) {
 		t.Error("expected task to receive pool context")
 	}
 }
+
+func TestPoolPanicResilience(t *testing.T) {
+	workers := 2
+	p := goroutine.NewPool(workers, 10)
+	defer p.Stop()
+
+	var wg sync.WaitGroup
+	wg.Add(workers + 1)
+
+	// Submit tasks that panic
+	for range workers {
+		p.Submit(func(ctx context.Context) error {
+			defer wg.Done()
+			panic("worker panic")
+		})
+	}
+
+	// Submit a normal task that should still run if the pool is resilient
+	var counter atomic.Int32
+	p.Submit(func(ctx context.Context) error {
+		defer wg.Done()
+		counter.Add(1)
+		return nil
+	})
+
+	wg.Wait()
+	if counter.Load() != 1 {
+		t.Errorf("expected 1 task to complete after panics, got %d", counter.Load())
+	}
+}

@@ -51,42 +51,67 @@ func NewPool(workers int, queueSize int) *Pool {
 func (p *Pool) worker() {
 	defer p.wg.Done()
 	for {
-		select {
-		case <-p.ctx.Done():
-			// Process remaining tasks in the queue before stopping
-			for {
-				select {
-				case task, ok := <-p.tasks:
-					if !ok {
+		var exit bool
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					// We can't do much here except catch it to keep the worker alive
+				}
+			}()
+
+			select {
+			case <-p.ctx.Done():
+				// Process remaining tasks in the queue before stopping
+				for {
+					select {
+					case task, ok := <-p.tasks:
+						if !ok {
+							exit = true
+							return
+						}
+						_ = task(p.ctx)
+					default:
+						exit = true
 						return
 					}
-					_ = task(p.ctx)
-				default:
+				}
+			case task, ok := <-p.tasks:
+				if !ok {
+					exit = true
 					return
 				}
+				_ = task(p.ctx)
 			}
-		case task, ok := <-p.tasks:
-			if !ok {
-				return
-			}
-			_ = task(p.ctx)
+		}()
+
+		if exit {
+			return
 		}
 	}
 }
 
-// Submit adds a task to the pool. Returns ErrPoolStopped if the pool is stopped.
-func (p *Pool) Submit(task Task) error {
+// SubmitCtx adds a task to the pool with context. Returns ErrPoolStopped if the pool is stopped or ctx.Err() if context is cancelled.
+func (p *Pool) SubmitCtx(ctx context.Context, task Task) error {
 	select {
+	case <-ctx.Done():
+		return ctx.Err()
 	case <-p.ctx.Done():
 		return ErrPoolStopped
 	default:
 		select {
+		case <-ctx.Done():
+			return ctx.Err()
 		case <-p.ctx.Done():
 			return ErrPoolStopped
 		case p.tasks <- task:
 			return nil
 		}
 	}
+}
+
+// Submit adds a task to the pool. Returns ErrPoolStopped if the pool is stopped.
+func (p *Pool) Submit(task Task) error {
+	return p.SubmitCtx(context.Background(), task)
 }
 
 // Context returns the pool's context.

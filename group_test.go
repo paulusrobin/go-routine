@@ -3,7 +3,6 @@ package goroutine_test
 import (
 	"context"
 	"errors"
-	"fmt"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -114,6 +113,52 @@ func TestPoolGroupStopOnFirstError(t *testing.T) {
 	}
 }
 
+func TestPoolGroupGoContextCancellation(t *testing.T) {
+	// Pool with no queue and only 1 worker to make it easily "busy"
+	p := goroutine.NewPool(1, 0)
+	defer p.Stop()
+
+	g := p.Group(context.Background())
+
+	// Task 1: Occupy the only worker
+	wg := make(chan struct{})
+	g.Go(func(ctx context.Context) error {
+		<-wg
+		return nil
+	})
+
+	// Task 2: Will be blocked in Submit because worker 1 is busy and queue is 0.
+	// We want to cancel the group while Task 2 is waiting.
+	ctx, cancel := context.WithCancel(context.Background())
+	g2 := p.Group(ctx)
+
+	// Start a goroutine that will cancel g2's context after a short delay
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+
+	// This should block until g2's context is cancelled
+	start := time.Now()
+	g2.Go(func(ctx context.Context) error {
+		return nil
+	})
+	duration := time.Since(start)
+
+	if duration < 50*time.Millisecond {
+		t.Errorf("expected Go to block for at least 50ms, took %v", duration)
+	}
+
+	err := g2.Wait()
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("expected context.Canceled, got %v", err)
+	}
+
+	// Clean up Task 1
+	close(wg)
+	g.Wait()
+}
+
 func TestPoolGroupParentContextCancel(t *testing.T) {
 	p := goroutine.NewPool(2, 10)
 	defer p.Stop()
@@ -137,26 +182,23 @@ func TestPoolGroupParentContextCancel(t *testing.T) {
 	}
 }
 
-func TestGroup(t *testing.T) {
-	p := goroutine.NewPool(10, 20)
+func TestPoolGroupPanic(t *testing.T) {
+	p := goroutine.NewPool(2, 10)
 	defer p.Stop()
 
 	g := p.Group(context.Background())
-	tasksCount := 10
-	for idx := range tasksCount {
-		g.Go(func(ctx context.Context) error {
-			fmt.Println("start", idx+1, "task")
-			time.Sleep(10 * time.Millisecond)
-			if idx+1 == 5 {
-				fmt.Println("error", idx+1, "task")
-				return fmt.Errorf("5 is error")
-			}
-			fmt.Println("finish", idx+1, "task")
-			return nil
-		})
+	panicMsg := "test panic"
+
+	g.Go(func(ctx context.Context) error {
+		panic(panicMsg)
+	})
+
+	err := g.Wait()
+	if err == nil {
+		t.Errorf("expected error from panic, got nil")
 	}
 
-	if err := g.Wait(); err != nil {
-		fmt.Println(err.Error())
+	if err.Error() != panicMsg {
+		t.Errorf("expected panic error message %q, got %q", panicMsg, err.Error())
 	}
 }
